@@ -198,15 +198,40 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
   }, [allBlocks, rules]);
 
   const ruleAccuracyStats = useMemo(() => {
-    const stats: Record<string, { pAcc: number; sAcc: number; total: number }> = {};
+    const stats: Record<string, { 
+      pAcc: number; sAcc: number; 
+      oddAcc: number; evenAcc: number; 
+      bigAcc: number; smallAcc: number; 
+      total: number 
+    }> = {};
+    
     rules.forEach(r => {
       const rHistory = history.filter(h => h.ruleId === r.id && h.resolved);
       if (rHistory.length === 0) {
-        stats[r.id] = { pAcc: 0, sAcc: 0, total: 0 };
+        stats[r.id] = { pAcc: 0, sAcc: 0, oddAcc: 0, evenAcc: 0, bigAcc: 0, smallAcc: 0, total: 0 };
       } else {
-        const pMatch = rHistory.filter(h => h.isParityCorrect).length;
-        const sMatch = rHistory.filter(h => h.isSizeCorrect).length;
-        stats[r.id] = { pAcc: Math.round((pMatch / rHistory.length) * 100), sAcc: Math.round((sMatch / rHistory.length) * 100), total: rHistory.length };
+        const pHistory = rHistory.filter(h => h.nextParity !== 'NEUTRAL');
+        const sHistory = rHistory.filter(h => h.nextSize !== 'NEUTRAL');
+        
+        const oddPreds = pHistory.filter(h => h.nextParity === 'ODD');
+        const evenPreds = pHistory.filter(h => h.nextParity === 'EVEN');
+        const bigPreds = sHistory.filter(h => h.nextSize === 'BIG');
+        const smallPreds = sHistory.filter(h => h.nextSize === 'SMALL');
+
+        const oddAcc = oddPreds.length > 0 ? Math.round((oddPreds.filter(p => p.isParityCorrect).length / oddPreds.length) * 100) : 0;
+        const evenAcc = evenPreds.length > 0 ? Math.round((evenPreds.filter(p => p.isParityCorrect).length / evenPreds.length) * 100) : 0;
+        const bigAcc = bigPreds.length > 0 ? Math.round((bigPreds.filter(p => p.isSizeCorrect).length / bigPreds.length) * 100) : 0;
+        const smallAcc = smallPreds.length > 0 ? Math.round((smallPreds.filter(p => p.isSizeCorrect).length / smallPreds.length) * 100) : 0;
+
+        const pMatch = pHistory.filter(h => h.isParityCorrect).length;
+        const sMatch = sHistory.filter(h => h.isSizeCorrect).length;
+        
+        stats[r.id] = { 
+          pAcc: pHistory.length > 0 ? Math.round((pMatch / pHistory.length) * 100) : 0, 
+          sAcc: sHistory.length > 0 ? Math.round((sMatch / sHistory.length) * 100) : 0,
+          oddAcc, evenAcc, bigAcc, smallAcc,
+          total: rHistory.length 
+        };
       }
     });
     return stats;
@@ -327,9 +352,29 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
                     <span className={`px-3 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider ${isSelected ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
                       {item.rule.label}
                     </span>
-                    <div className="mt-2 flex items-center space-x-2">
-                       <Trophy className="w-3 h-3 text-amber-500" />
-                       <span className="text-[10px] font-bold text-indigo-600">胜率: {stats?.pAcc || 0}% / {stats?.sAcc || 0}%</span>
+                    <div className="mt-2 space-y-2">
+                       <div className="flex items-center space-x-1.5">
+                          <Trophy className="w-3 h-3 text-amber-500" />
+                          <span className="text-[10px] font-bold text-indigo-600">总胜率: {stats?.pAcc || 0}% / {stats?.sAcc || 0}%</span>
+                       </div>
+                       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[8px] font-black uppercase text-gray-400 bg-gray-50/50 p-2 rounded-xl">
+                          <div className="flex justify-between items-center">
+                            <span>单:</span>
+                            <span className="text-red-500 font-bold">{stats?.oddAcc || 0}%</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span>双:</span>
+                            <span className="text-teal-500 font-bold">{stats?.evenAcc || 0}%</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span>大:</span>
+                            <span className="text-orange-500 font-bold">{stats?.bigAcc || 0}%</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span>小:</span>
+                            <span className="text-indigo-500 font-bold">{stats?.smallAcc || 0}%</span>
+                          </div>
+                       </div>
                     </div>
                   </div>
                   {item.result.shouldPredict && <Sparkles className="w-5 h-5 text-amber-400 animate-pulse" />}
