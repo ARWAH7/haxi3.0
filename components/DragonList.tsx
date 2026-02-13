@@ -1,7 +1,7 @@
 
 import React, { useMemo, memo, useCallback, useState } from 'react';
 import { BlockData, IntervalRule, FollowedPattern } from '../types';
-import { Flame, Info, ChevronRight, Grid3X3, BarChart3, Heart, Star, Filter, MousePointer2 } from 'lucide-react';
+import { Info, ChevronRight, Grid3X3, BarChart3, Heart, Star, Filter } from 'lucide-react';
 
 interface DragonListProps {
   allBlocks: BlockData[];
@@ -405,4 +405,13 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
 DragonList.displayName = 'DragonList';
 
-export default DragonList;
+// ✅ React.memo 优化：只有当关键 props 改变时才重新渲染
+export default memo(DragonList, (prevProps, nextProps) => {
+  return (
+    prevProps.allBlocks === nextProps.allBlocks &&
+    prevProps.rules === nextProps.rules &&
+    prevProps.followedPatterns === nextProps.followedPatterns &&
+    prevProps.onToggleFollow === nextProps.onToggleFollow &&
+    prevProps.onJumpToChart === nextProps.onJumpToChart
+  );
+});

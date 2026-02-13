@@ -1,7 +1,19 @@
 
 import React, { useState, useEffect, memo, useMemo, useCallback, useRef } from 'react';
 import { BlockData, AIPredictionResult, PredictionHistoryItem, IntervalRule } from '../types';
-import { BrainCircuit, Sparkles, TrendingUp, ShieldAlert, Target, RefreshCw, Zap, CheckCircle2, XCircle, Clock, Waves, Search, ShieldCheck, Activity, Filter, Trophy, BarChart3, PieChart, Layers, Loader2, Info, ArrowUpRight, Gauge, ChevronRight, BookOpen, Fingerprint, HelpCircle, X, Microscope, Network, Box } from 'lucide-react';
+import { BrainCircuit, Sparkles, Target, RefreshCw, CheckCircle2, XCircle, Clock, ShieldCheck, Activity, Filter, Trophy, Loader2, ChevronRight, BookOpen, HelpCircle, X, Microscope, Network, Download, Trash2 } from 'lucide-react';
+import { runDeepAnalysisV5, getNextAlignedHeight } from '../utils/aiAnalysis';
+import { InteractiveChart } from './InteractiveChart';
+import { ModelTrendAnalysisModal } from './ModelTrendAnalysisModal';
+import { 
+  savePrediction, 
+  loadPredictions, 
+  clearPredictions,
+  saveModelStats as saveModelStatsAPI,
+  loadModelStats,
+  clearModelStats,
+  debouncedSaveModelStats
+} from '../services/aiApi';
 
 interface AIPredictionProps {
   allBlocks: BlockData[];
@@ -31,17 +43,7 @@ const AI_MODELS_DOCS = [
     icon: <Microscope className="w-5 h-5 text-emerald-500" />,
     color: "text-emerald-500",
     bg: "bg-emerald-50"
-  },
-  {
-    id: "spectral",
-    name: "频谱周期律检测 (Spectral Analysis)",
-    short: "破译哈希伪随机",
-    desc: "该模型利用傅里叶变换原理，将离散的哈希结果转化为频域信号。它能检测哈希流中隐藏的‘固定步长重复’。例如，某些哈希序列在每隔 5-7 个区块会呈现出规律性的反转，该模型专门针对此类伪随机规律进行破译。",
-    icon: <Waves className="w-5 h-5 text-amber-500" />,
-    color: "text-amber-500",
-    bg: "bg-amber-50"
-  },
-  {
+  },  {
     id: "density",
     name: "密集簇群共振 (Density Clustering)",
     short: "寻找能量爆发点",
@@ -52,141 +54,290 @@ const AI_MODELS_DOCS = [
   }
 ];
 
-const getNextAlignedHeight = (currentHeight: number, step: number, startBlock: number) => {
-  const offset = startBlock || 0;
-  // 如果步长小于等于1，直接预测下一期
-  if (step <= 1) return currentHeight + 1;
-  
-  const diff = currentHeight - offset;
-  // 计算当前高度之后最近的一个符合步长规则的高度
-  const nextMultiplier = Math.floor(diff / step) + 1;
-  const nextHeight = offset + (nextMultiplier * step);
-  
-  // 兜底：如果算出来的高度不大于当前高度，则强制再加一个步长
-  return nextHeight > currentHeight ? nextHeight : nextHeight + step;
-};
-
-/**
- * 核心演算逻辑 v4.0：极致追求稳定性
- */
-const runDeepAnalysisV4 = (blocks: BlockData[], rule: IntervalRule, targetHeight: number): AIPredictionResult & { ruleId: string } => {
-  const checkAlignment = (h: number) => {
-    if (rule.value <= 1) return true;
-    if (rule.startBlock > 0) return h >= rule.startBlock && (h - rule.startBlock) % rule.value === 0;
-    return h % rule.value === 0;
-  };
-
-  const ruleBlocks = blocks.filter(b => checkAlignment(b.height)).slice(0, 80);
-  
-  if (ruleBlocks.length < 24) {
-    return { shouldPredict: false, nextParity: 'NEUTRAL', parityConfidence: 0, nextSize: 'NEUTRAL', sizeConfidence: 0, analysis: "数据厚度不足，模型锁定中", detectedCycle: "数据采集", riskLevel: "HIGH", entropyScore: 100, ruleId: rule.id };
-  }
-
-  const pSeq = ruleBlocks.slice(0, 12).map(b => b.type === 'ODD' ? 'O' : 'E').join('');
-  const sSeq = ruleBlocks.slice(0, 12).map(b => b.sizeType === 'BIG' ? 'B' : 'S').join('');
-  
-  const oddCount = ruleBlocks.filter(b => b.type === 'ODD').length;
-  const bigCount = ruleBlocks.filter(b => b.sizeType === 'BIG').length;
-  const pBias = (oddCount / ruleBlocks.length);
-  const sBias = (bigCount / ruleBlocks.length);
-
-  let nextP: 'ODD' | 'EVEN' | 'NEUTRAL' = 'NEUTRAL';
-  let confP = 50;
-  let modelP = "随机分布";
-
-  let nextS: 'BIG' | 'SMALL' | 'NEUTRAL' = 'NEUTRAL';
-  let confS = 50;
-  let modelS = "随机分布";
-
-  const getBayesianConf = (bias: number) => {
-    const deviation = Math.abs(bias - 0.5);
-    if (deviation > 0.18) return 94;
-    if (deviation > 0.12) return 88;
-    return 50;
-  };
-
-  const checkPeriodicity = (seq: string) => {
-    if (seq.startsWith('OEOEOE') || seq.startsWith('EOEOEO')) return { match: true, val: seq[0] === 'O' ? 'EVEN' : 'ODD', conf: 93 };
-    if (seq.startsWith('OOEEOO') || seq.startsWith('EEOOEE')) return { match: true, val: seq[0] === 'O' ? 'EVEN' : 'ODD', conf: 91 };
-    if (seq.startsWith('BSBSBS') || seq.startsWith('SBSBSB')) return { match: true, val: seq[0] === 'B' ? 'SMALL' : 'BIG', conf: 93 };
-    if (seq.startsWith('BBSSBB') || seq.startsWith('SSBBSS')) return { match: true, val: seq[0] === 'B' ? 'SMALL' : 'BIG', conf: 91 };
-    return { match: false, val: 'NEUTRAL', conf: 0 };
-  };
-
-  const checkDensity = (seq: string) => {
-    if (seq.startsWith('OOOO')) return { match: true, val: 'ODD', conf: 95 }; 
-    if (seq.startsWith('EEEE')) return { match: true, val: 'EVEN', conf: 95 };
-    if (seq.startsWith('BBBB')) return { match: true, val: 'BIG', conf: 95 };
-    if (seq.startsWith('SSSS')) return { match: true, val: 'SMALL', conf: 95 };
-    return { match: false, val: 'NEUTRAL', conf: 0 };
-  };
-
-  const pPeriod = checkPeriodicity(pSeq);
-  const pDensity = checkDensity(pSeq);
-  const pBayesConf = getBayesianConf(pBias);
-
-  if (pPeriod.match && (pPeriod.val === 'ODD' || pPeriod.val === 'EVEN')) {
-    nextP = pPeriod.val as any;
-    confP = pPeriod.conf;
-    modelP = "频谱周期律检测";
-  } else if (pDensity.match && (pDensity.val === 'ODD' || pDensity.val === 'EVEN')) {
-    nextP = pDensity.val as any;
-    confP = pDensity.conf;
-    modelP = "密集簇群共振";
-  } else if (pBayesConf > 90) {
-    nextP = pBias > 0.5 ? 'EVEN' : 'ODD';
-    confP = pBayesConf;
-    modelP = "贝叶斯后验推理";
-  }
-
-  const sPeriod = checkPeriodicity(sSeq);
-  const sDensity = checkDensity(sSeq);
-  const sBayesConf = getBayesianConf(sBias);
-
-  if (sPeriod.match && (sPeriod.val === 'BIG' || sPeriod.val === 'SMALL')) {
-    nextS = sPeriod.val as any;
-    confS = sPeriod.conf;
-    modelS = "频谱周期律检测";
-  } else if (sDensity.match && (sDensity.val === 'BIG' || sDensity.val === 'SMALL')) {
-    nextS = sDensity.val as any;
-    confS = sDensity.conf;
-    modelS = "密集簇群共振";
-  } else if (sBayesConf > 90) {
-    nextS = sBias > 0.5 ? 'SMALL' : 'BIG';
-    confS = sBayesConf;
-    modelS = "贝叶斯后验推理";
-  }
-
-  const entropy = Math.round(Math.random() * 20 + 10);
-  const shouldPredict = (confP >= 92 || confS >= 92) && entropy < 40;
-
-  return {
-    shouldPredict,
-    nextParity: nextP,
-    parityConfidence: Math.min(99, Math.round(confP)),
-    nextSize: nextS,
-    sizeConfidence: Math.min(99, Math.round(confS)),
-    analysis: `稳定模型 [${modelP}/${modelS}] 探测到 [${rule.label}] 的哈希流呈显著共振。`,
-    detectedCycle: modelP !== "随机分布" ? modelP : modelS,
-    riskLevel: entropy < 25 ? 'LOW' : 'MEDIUM',
-    entropyScore: entropy,
-    targetHeight,
-    ruleId: rule.id
-  };
-};
-
 const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) => {
   const [activeFilter, setActiveFilter] = useState<PredictionFilter>('ALL');
   const [selectedRuleId, setSelectedRuleId] = useState<string>('ALL');
+  const [selectedModelId, setSelectedModelId] = useState<string>('ALL');
+  const [selectedHistoryRuleId, setSelectedHistoryRuleId] = useState<string>('ALL');
+  const [selectedModelForChart, setSelectedModelForChart] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [showDocsId, setShowDocsId] = useState<string | null>(null);
-  const [showDictionary, setShowDictionary] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [isPredicting, setIsPredicting] = useState(false); // 默认为停止状态
   const lastAnalyzedHeight = useRef(0);
 
-  const [history, setHistory] = useState<(PredictionHistoryItem & { ruleId: string })[]>(() => {
-    const saved = localStorage.getItem('ai_prediction_history_v10');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [history, setHistory] = useState<(PredictionHistoryItem & { ruleId: string })[]>([]);
+
+  // 模型性能统计（累计所有预测，不限制数量）
+  const [modelStats, setModelStats] = useState<Record<string, { total: number; correct: number }>>({});
+
+  // 从后端加载数据
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoading(true);
+      try {
+        console.log('[AI 预测] 🔄 开始从 Redis 加载数据...');
+        
+        // 并行加载预测历史和模型统计
+        const [predictions, stats] = await Promise.all([
+          loadPredictions(),
+          loadModelStats()
+        ]);
+
+        if (predictions && predictions.length > 0) {
+          setHistory(predictions);
+          console.log('[AI 预测] ✅ 预测历史已加载:', predictions.length, '条');
+        }
+        
+        if (stats && Object.keys(stats).length > 0) {
+          setModelStats(stats);
+          console.log('[AI 预测] ✅ 模型统计已加载');
+        }
+
+        console.log('[AI 预测] ✅ 从 Redis 加载数据成功');
+      } catch (error) {
+        console.error('[AI 预测] ❌ 加载数据失败:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  // 保存预测历史到后端（防抖）
+  useEffect(() => {
+    if (history.length > 0) {
+      // 保存最新的预测记录
+      const latestPrediction = history[0];
+      savePrediction(latestPrediction);
+    }
+  }, [history]);
+
+  // 保存模型统计到后端（防抖）
+  useEffect(() => {
+    if (Object.keys(modelStats).length > 0) {
+      debouncedSaveModelStats(modelStats);
+    }
+  }, [modelStats]);
+
+  // 清除历史记录函数
+  const clearHistory = useCallback(async () => {
+    const confirmed = window.confirm('确定要清除所有历史预测记录吗？此操作不可恢复。');
+    if (!confirmed) return;
+
+    try {
+      setIsLoading(true);
+      // 调用后端 API 清除预测历史
+      const success = await clearPredictions();
+      if (success) {
+        setHistory([]);
+        console.log('[AI 预测] ✅ 预测历史已清除');
+      }
+    } catch (error) {
+      console.error('[AI 预测] ❌ 清除预测历史失败:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // 开始预测
+  const startPrediction = useCallback(() => {
+    setIsPredicting(true);
+    setError(null);
+    console.log('[预测控制] 开始预测');
+  }, []);
+
+  // 停止预测
+  const stopPrediction = useCallback(() => {
+    setIsPredicting(false);
+    setError(null);
+    console.log('[预测控制] 停止预测');
+  }, []);
+
+  // 清除所有数据
+  const clearAllData = useCallback(async () => {
+    const confirmed = window.confirm('确定要清除所有模型统计数据和演算历史吗？此操作不可恢复。');
+    if (!confirmed) return;
+
+    try {
+      setIsLoading(true);
+      setError(null);
+      
+      // 调用后端 API 清除所有数据
+      await Promise.all([
+        clearPredictions(),
+        clearModelStats()
+      ]);
+      
+      // 清除前端状态
+      setHistory([]);
+      setModelStats({});
+      
+      console.log('[AI 预测] ✅ 已清除所有数据');
+      
+      // 强制刷新页面以确保状态完全重置
+      window.location.reload();
+    } catch (error) {
+      console.error('[AI 预测] ❌ 清除数据失败:', error);
+      setError('清除数据失败，请稍后重试');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // 导出历史记录函数
+  const exportHistory = useCallback(async () => {
+    try {
+      setIsExporting(true);
+      setError(null);
+      
+      // 从后端API获取所有历史数据
+      console.log('[导出] 正在从后端API获取历史数据...');
+      const response = await fetch('http://localhost:3001/api/ai/predictions?limit=10000');
+      const result = await response.json();
+      
+      let exportData: typeof history = [];
+      
+      if (result.success && result.data && result.data.length > 0) {
+        console.log('[导出] 成功从后端API获取', result.data.length, '条历史数据');
+        // 只导出已验证的记录，这样才能和模型统计保持一致
+        exportData = result.data.filter((item: any) => item.resolved === true);
+        console.log('[导出] 过滤后已验证的记录:', exportData.length, '条');
+      } else {
+        console.error('[导出] 从后端API获取失败或数据为空');
+        setError('暂无历史记录可导出');
+        setIsExporting(false);
+        return;
+      }
+      
+      // 确保数据不为空
+      if (exportData.length === 0) {
+        setError('暂无已验证的历史记录可导出');
+        setIsExporting(false);
+        return;
+      }
+      
+      // 按预测高度降序排序（高度大的在前）
+      exportData.sort((a, b) => (b.targetHeight || 0) - (a.targetHeight || 0));
+      
+      console.log('[导出] 开始处理', exportData.length, '条已验证的历史数据...');
+
+      // 准备 CSV 数据 - 新的9列格式
+      const headers = ['时间', '规则', '预测高度', '演算模型', '预测', '实际', '结果', '置信度', '状态'];
+      const rows = exportData.map(item => {
+        const rule = rules.find(r => r.id === item.ruleId);
+        const timestamp = new Date(item.timestamp).toLocaleString('zh-CN');
+        const status = item.resolved ? '已验证' : '待验证';
+        
+        // 判断预测类型：单双、大小、还是两者都有
+        const hasParity = item.nextParity !== 'NEUTRAL';
+        const hasSize = item.nextSize !== 'NEUTRAL';
+        
+        // 预测列：根据预测类型显示
+        let prediction = '';
+        if (hasParity && hasSize) {
+          prediction = `${item.nextParity === 'ODD' ? '单' : '双'} / ${item.nextSize === 'BIG' ? '大' : '小'}`;
+        } else if (hasParity) {
+          prediction = item.nextParity === 'ODD' ? '单' : '双';
+        } else if (hasSize) {
+          prediction = item.nextSize === 'BIG' ? '大' : '小';
+        } else {
+          prediction = '观望';
+        }
+        
+        // 实际列：根据预测类型显示实际结果
+        let actual = '';
+        if (item.resolved) {
+          if (hasParity && hasSize) {
+            actual = `${item.actualParity === 'ODD' ? '单' : '双'} / ${item.actualSize === 'BIG' ? '大' : '小'}`;
+          } else if (hasParity) {
+            actual = item.actualParity === 'ODD' ? '单' : '双';
+          } else if (hasSize) {
+            actual = item.actualSize === 'BIG' ? '大' : '小';
+          }
+        }
+        
+        // 结果列：根据预测类型显示结果
+        let result = '';
+        if (item.resolved) {
+          if (hasParity && hasSize) {
+            const parityCorrect = item.isParityCorrect ? '✓' : '✗';
+            const sizeCorrect = item.isSizeCorrect ? '✓' : '✗';
+            result = `${parityCorrect} / ${sizeCorrect}`;
+          } else if (hasParity) {
+            result = item.isParityCorrect ? '✓ 正确' : '✗ 错误';
+          } else if (hasSize) {
+            result = item.isSizeCorrect ? '✓ 正确' : '✗ 错误';
+          }
+        } else {
+          result = '待验证';
+        }
+        
+        // 置信度列：根据预测类型显示置信度
+        let confidence = '';
+        if (hasParity && hasSize) {
+          confidence = `${item.parityConfidence}% / ${item.sizeConfidence}%`;
+        } else if (hasParity) {
+          confidence = `${item.parityConfidence}%`;
+        } else if (hasSize) {
+          confidence = `${item.sizeConfidence}%`;
+        }
+        
+        return [
+          timestamp,
+          rule?.label || '未知规则',
+          item.targetHeight || '',
+          item.detectedCycle || '',
+          prediction,
+          actual,
+          result,
+          confidence,
+          status
+        ];
+      });
+
+      // 生成 CSV 内容
+      const csvContent = [
+        headers.join(','),
+        ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+      ].join('\n');
+
+      // 添加 BOM 以支持中文
+      const BOM = '\uFEFF';
+      const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
+      
+      // 创建下载链接
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `AI预测历史_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+      console.log('[导出] 成功导出', exportData.length, '条历史数据');
+      setIsExporting(false);
+    } catch (error) {
+      console.error('[导出] 导出失败:', error);
+      setError('导出失败，请稍后重试');
+      setIsExporting(false);
+    }
+  }, [rules]);
+
+  // 清除指定规则的历史记录
+  const clearRuleHistory = useCallback((ruleId: string) => {
+    const ruleName = rules.find(r => r.id === ruleId)?.label || '该规则';
+    const confirmed = window.confirm(`确定要清除 ${ruleName} 的所有历史预测记录吗？`);
+    if (confirmed) {
+      setHistory(prev => prev.filter(item => item.ruleId !== ruleId));
+    }
+  }, [rules]);
 
   // 1. 修复点：删除规则时清理对应历史
   useEffect(() => {
@@ -200,9 +351,43 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     });
   }, [rules]);
 
+  // 从后端API获取历史数据和模型统计数据
   useEffect(() => {
-    localStorage.setItem('ai_prediction_history_v10', JSON.stringify(history));
-  }, [history]);
+    const fetchHistoryAndStats = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        // 获取历史预测数据
+        const historyResponse = await fetch('http://localhost:3001/api/ai/predictions?limit=10000');
+        const historyResult = await historyResponse.json();
+        if (historyResult.success && historyResult.data) {
+          console.log('[数据加载] 成功从后端API获取', historyResult.data.length, '条历史预测数据');
+          setHistory(historyResult.data);
+        }
+
+        // 获取模型统计数据
+        const statsResponse = await fetch('http://localhost:3001/api/ai/model-stats');
+        const statsResult = await statsResponse.json();
+        if (statsResult.success && statsResult.data) {
+          console.log('[数据加载] 成功从后端API获取模型统计数据');
+          setModelStats(statsResult.data);
+        }
+      } catch (error) {
+        console.error('[数据加载] 从后端API获取数据失败:', error);
+        setError('数据加载失败，请稍后刷新');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchHistoryAndStats();
+  }, []);
+
+  // ⚡ 基于内容的指纹，避免 allBlocks 引用变化触发昂贵的重新计算
+  const blocksFingerprint = useMemo(() => {
+    if (allBlocks.length === 0) return '';
+    return `${allBlocks.length}-${allBlocks[0]?.height}-${allBlocks[allBlocks.length - 1]?.height}`;
+  }, [allBlocks]);
 
   // 2. 修复点：新增规则时从最新高度往后计算 targetHeight
   const rulesMatrix = useMemo(() => {
@@ -211,9 +396,10 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     return rules.map(rule => {
       // 确保预测高度严格大于当前最新高度
       const targetHeight = getNextAlignedHeight(currentHeight, rule.value, rule.startBlock);
-      return { rule, result: runDeepAnalysisV4(allBlocks, rule, targetHeight) };
+      return { rule, result: runDeepAnalysisV5(allBlocks, rule, targetHeight) };
     });
-  }, [allBlocks, rules]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocksFingerprint, rules]);
 
   const ruleAccuracyStats = useMemo(() => {
     const stats: Record<string, { 
@@ -256,51 +442,237 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
   }, [history, rules]);
 
   useEffect(() => {
-    if (allBlocks.length < 50 || isSyncing) return;
+    if (allBlocks.length < 50 || isSyncing || !isPredicting) return;
     const currentTop = allBlocks[0].height;
     
     // 我们在这里监听高度变化或规则变化
     setIsSyncing(true);
 
-    const newPredictions = rulesMatrix
+    // ⚡ 构建已有预测的快速查找 Set，O(1) 替代 O(n) 的 history.some()
+    const existingParityKeys = new Set(
+      history.filter(h => h.nextParity !== 'NEUTRAL' && h.nextSize === 'NEUTRAL')
+        .map(h => `${h.ruleId}-${h.targetHeight}`)
+    );
+    const existingSizeKeys = new Set(
+      history.filter(h => h.nextSize !== 'NEUTRAL' && h.nextParity === 'NEUTRAL')
+        .map(h => `${h.ruleId}-${h.targetHeight}`)
+    );
+
+    const newPredictions: (PredictionHistoryItem & { ruleId: string })[] = [];
+
+    rulesMatrix
       .filter(m => m.result.shouldPredict)
-      // 检查历史记录中是否已经存在该规则在该高度的预测
-      .filter(m => !history.some(h => h.ruleId === m.rule.id && h.targetHeight === m.result.targetHeight))
-      .map(m => ({
-        ...m.result,
-        id: `pred-${m.rule.id}-${Date.now()}-${Math.random()}`,
-        timestamp: Date.now(),
-        resolved: false,
-        ruleId: m.rule.id,
-        detectedCycle: m.result.detectedCycle
-      }));
+      .forEach(m => {
+        const hasParity = m.result.nextParity !== 'NEUTRAL';
+        const hasSize = m.result.nextSize !== 'NEUTRAL';
+        const lookupKey = `${m.rule.id}-${m.result.targetHeight}`;
+
+        // 如果同时有单双和大小预测，分成两条记录
+        if (hasParity && hasSize) {
+          // 检查单双预测是否已存在
+          if (!existingParityKeys.has(lookupKey)) {
+            // 单双预测记录
+            newPredictions.push({
+              ...m.result,
+              id: `pred-${m.rule.id}-parity-${Date.now()}-${Math.random()}`,
+              timestamp: Date.now(),
+              resolved: false,
+              ruleId: m.rule.id,
+              detectedCycle: m.result.detectedCycle,
+              nextSize: 'NEUTRAL', // 只显示单双
+              sizeConfidence: 0
+            });
+          }
+
+          // 检查大小预测是否已存在
+          if (!existingSizeKeys.has(lookupKey)) {
+            // 大小预测记录
+            newPredictions.push({
+              ...m.result,
+              id: `pred-${m.rule.id}-size-${Date.now()}-${Math.random()}`,
+              timestamp: Date.now(),
+              resolved: false,
+              ruleId: m.rule.id,
+              detectedCycle: m.result.detectedCycle,
+              nextParity: 'NEUTRAL', // 只显示大小
+              parityConfidence: 0
+            });
+          }
+        } else {
+          // 只有单双或只有大小，检查是否已存在
+          const existsInSet = hasParity
+            ? existingParityKeys.has(lookupKey)
+            : existingSizeKeys.has(lookupKey);
+
+          if (!existsInSet) {
+            newPredictions.push({
+              ...m.result,
+              id: `pred-${m.rule.id}-${Date.now()}-${Math.random()}`,
+              timestamp: Date.now(),
+              resolved: false,
+              ruleId: m.rule.id,
+              detectedCycle: m.result.detectedCycle
+            });
+          }
+        }
+      });
 
     if (newPredictions.length > 0) {
-      setHistory(prev => [...newPredictions, ...prev].slice(0, 400));
+      // 保存当前历史状态，用于回滚
+      const originalHistory = [...history];
+      
+      // 乐观更新前端状态
+      setHistory(prev => {
+        const combined = [...newPredictions, ...prev];
+        
+        // 按时间戳排序，最新的在前面
+        const sortedHistory = combined.sort((a, b) => b.timestamp - a.timestamp);
+        
+        // 前端显示所有记录（不再限制为50条）
+        return sortedHistory;
+      });
+      
+      // 保存新预测到后端数据库
+      const savePromises = newPredictions.map(prediction => {
+        return fetch('http://localhost:3001/api/ai/predictions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(prediction)
+        })
+        .then(response => response.json())
+        .then(result => {
+          if (result.success) {
+            console.log('[预测保存] 成功保存预测到后端数据库:', prediction.targetHeight);
+            return true;
+          } else {
+            console.error('[预测保存] 保存预测到后端数据库失败:', result.error);
+            return false;
+          }
+        })
+        .catch(error => {
+          console.error('[预测保存] 保存预测到后端数据库失败:', error);
+          return false;
+        });
+      });
+      
+      // 等待所有保存操作完成
+      Promise.all(savePromises).then(results => {
+        const allSuccess = results.every(result => result);
+        if (!allSuccess) {
+          console.error('[预测保存] 部分或全部预测保存失败，回滚前端状态');
+          // 回滚前端状态
+          setHistory(originalHistory);
+          setError('预测保存失败，请稍后重试');
+        }
+      });
     }
     setIsSyncing(false);
-  }, [allBlocks[0]?.height, rulesMatrix, history.length]); // 依赖项调整
+  }, [allBlocks[0]?.height, rulesMatrix, history.length, isPredicting]); // 依赖项调整
 
   useEffect(() => {
     if (allBlocks.length === 0 || history.length === 0) return;
     const latest = allBlocks[0];
     let changed = false;
+    const newlyResolved: (PredictionHistoryItem & { ruleId: string })[] = [];
+    
     const newHistory = history.map(item => {
       if (!item.resolved && latest.height >= (item.targetHeight || 0)) {
         const target = allBlocks.find(b => b.height === item.targetHeight);
         if (target) {
           changed = true;
-          return { ...item, resolved: true, actualParity: target.type, actualSize: target.sizeType, isParityCorrect: item.nextParity === target.type, isSizeCorrect: item.nextSize === target.sizeType };
+          const resolvedItem = { 
+            ...item, 
+            resolved: true, 
+            actualParity: target.type, 
+            actualSize: target.sizeType, 
+            isParityCorrect: item.nextParity === target.type, 
+            isSizeCorrect: item.nextSize === target.sizeType 
+          };
+          newlyResolved.push(resolvedItem);
+          return resolvedItem;
         }
       }
       return item;
     });
-    if (changed) setHistory(newHistory);
+    
+    if (changed) {
+      setHistory(newHistory);
+      
+      // 保存已验证的预测记录到后端数据库
+      if (newlyResolved.length > 0) {
+        newlyResolved.forEach(resolvedItem => {
+          fetch('http://localhost:3001/api/ai/predictions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(resolvedItem)
+          })
+          .then(response => response.json())
+          .then(result => {
+            if (result.success) {
+              console.log('[预测更新] 成功更新已验证的预测记录到后端数据库:', resolvedItem.targetHeight);
+            } else {
+              console.error('[预测更新] 更新预测记录到后端数据库失败:', result.error);
+            }
+          })
+          .catch(error => {
+            console.error('[预测更新] 更新预测记录到后端数据库失败:', error);
+          });
+        });
+      }
+      
+      // 更新模型统计数据 - 基于所有已验证的记录重新计算，而不是累加
+      if (newlyResolved.length > 0) {
+        // 重新计算所有已验证记录的模型统计
+        const allResolvedRecords = newHistory.filter(h => h.resolved);
+        const recalculatedStats: Record<string, { total: number; correct: number }> = {};
+        
+        allResolvedRecords.forEach(item => {
+          const model = item.detectedCycle;
+          if (model) {
+            if (!recalculatedStats[model]) {
+              recalculatedStats[model] = { total: 0, correct: 0 };
+            }
+            recalculatedStats[model].total++;
+            if (item.isParityCorrect || item.isSizeCorrect) {
+              recalculatedStats[model].correct++;
+            }
+          }
+        });
+        
+        setModelStats(recalculatedStats);
+
+        // 保存模型统计数据到后端数据库
+        fetch('http://localhost:3001/api/ai/model-stats', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(recalculatedStats)
+        })
+        .then(response => response.json())
+        .then(result => {
+          if (result.success) {
+            console.log('[统计保存] 成功保存模型统计数据到后端数据库');
+          } else {
+            console.error('[统计保存] 保存模型统计数据到后端数据库失败:', result.error);
+          }
+        })
+        .catch(error => {
+          console.error('[统计保存] 保存模型统计数据到后端数据库失败:', error);
+        });
+      }
+    }
   }, [allBlocks, history]);
 
   const filteredHistory = useMemo(() => {
     let base = history;
     if (selectedRuleId !== 'ALL') base = base.filter(h => h.ruleId === selectedRuleId);
+    if (selectedHistoryRuleId !== 'ALL') base = base.filter(h => h.ruleId === selectedHistoryRuleId);
+    if (selectedModelId !== 'ALL') base = base.filter(h => h.detectedCycle === selectedModelId);
     if (activeFilter !== 'ALL') {
       base = base.filter(h => {
         if (activeFilter === 'ODD' || activeFilter === 'EVEN') return h.nextParity === activeFilter;
@@ -308,134 +680,477 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
         return true;
       });
     }
-    return base;
-  }, [history, selectedRuleId, activeFilter]);
+    
+    // 排序：未开奖的在最上面（按区块高度降序），已开奖的在下面（按区块高度降序）
+    const sorted = base.sort((a, b) => {
+      // 如果一个已开奖，一个未开奖，未开奖的排在前面
+      if (a.resolved !== b.resolved) {
+        return a.resolved ? 1 : -1;
+      }
+      // 同样状态的按区块高度降序排列（高度大的在前）
+      return (b.targetHeight || 0) - (a.targetHeight || 0);
+    });
+    
+    return sorted;
+  }, [history, selectedRuleId, selectedHistoryRuleId, selectedModelId, activeFilter]);
+  
+  // 分页数据
+  const paginatedHistory = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    return filteredHistory.slice(startIndex, endIndex);
+  }, [filteredHistory, currentPage, pageSize]);
+  
+  // 总页数
+  const totalPages = useMemo(() => {
+    return Math.ceil(filteredHistory.length / pageSize);
+  }, [filteredHistory, pageSize]);
 
-  const focusedRuleResult = useMemo(() => {
-    if (selectedRuleId === 'ALL') return null;
-    return rulesMatrix.find(m => m.rule.id === selectedRuleId);
-  }, [selectedRuleId, rulesMatrix]);
+  // Dummy variable to prevent errors (FOCUS PANEL removed)
+  const focusedRuleResult = null;
+
+  // 计算模型性能排行（使用累计统计数据）
+  const modelPerformance = useMemo(() => {
+    // 定义所有9个模型
+    const allModels = [
+      '隐马尔可夫模型',
+      'LSTM时间序列',
+      'ARIMA模型',
+      '熵值突变检测',
+      '蒙特卡洛模拟',
+      '小波变换分析',
+      '马尔可夫状态迁移',
+      '贝叶斯后验推理',
+      '密集簇群共振'
+    ];
+    
+    return allModels.map(model => {
+      const stats = modelStats[model] || { total: 0, correct: 0 };
+      return {
+        model,
+        accuracy: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
+        total: stats.total,
+        correct: stats.correct
+      };
+    }).sort((a, b) => {
+      // 先按准确率排序，准确率相同则按预测次数排序
+      if (b.accuracy !== a.accuracy) return b.accuracy - a.accuracy;
+      return b.total - a.total;
+    });
+  }, [modelStats]);
+
+  // 计算总体统计
+  const overallStats = useMemo(() => {
+    const resolved = history.filter(h => h.resolved);
+    if (resolved.length === 0) return { accuracy: 0, total: 0, correct: 0, winRate: 0, riskLevel: 'MEDIUM' };
+    
+    const correct = resolved.filter(h => h.isParityCorrect || h.isSizeCorrect).length;
+    const accuracy = Math.round((correct / resolved.length) * 100);
+    const winRate = accuracy;
+    
+    // 计算风险等级
+    let riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM';
+    if (accuracy >= 80) riskLevel = 'LOW';
+    else if (accuracy < 60) riskLevel = 'HIGH';
+    
+    return { 
+      accuracy, 
+      total: resolved.length, 
+      correct, 
+      winRate,
+      riskLevel
+    };
+  }, [history]);
+
+  // ⚡ 智能推荐逻辑：从 IIFE 提取为 useMemo，避免每次渲染重新计算
+  const smartRecommendation = useMemo(() => {
+    const recentHistory = history.filter(h => h.resolved).slice(0, 50);
+    const modelScores = modelPerformance.map(model => {
+      const recentPredictions = recentHistory.filter(h => h.detectedCycle === model.model);
+      const recentAccuracy = recentPredictions.length > 0
+        ? Math.round((recentPredictions.filter(h => h.isParityCorrect || h.isSizeCorrect).length / recentPredictions.length) * 100)
+        : 0;
+      const last10 = recentPredictions.slice(0, 10);
+      const stability = last10.length >= 5 ? 100 - (Math.abs(recentAccuracy - model.accuracy)) : 50;
+      const score = (model.accuracy * 0.5) + (recentAccuracy * 0.3) + (stability * 0.2);
+      return {
+        ...model,
+        recentAccuracy,
+        stability,
+        score,
+        isActive: recentPredictions.length > 0
+      };
+    }).filter(m => m.total >= 3);
+    modelScores.sort((a, b) => b.score - a.score);
+    return modelScores[0] || null;
+  }, [history, modelPerformance]);
+
+  // ⚡ 市场环境识别：从 IIFE 提取为 useMemo
+  const marketEnvironment = useMemo(() => {
+    const recentHistory = history.filter(h => h.resolved).slice(0, 30);
+    if (recentHistory.length < 10) return null;
+
+    const accuracies = recentHistory.map((h, i) => {
+      const upToNow = recentHistory.slice(i);
+      const correct = upToNow.filter(h2 => h2.isParityCorrect || h2.isSizeCorrect).length;
+      return (correct / upToNow.length) * 100;
+    });
+
+    const avgAccuracy = accuracies.reduce((a, b) => a + b, 0) / accuracies.length;
+    const variance = accuracies.reduce((sum, acc) => sum + Math.pow(acc - avgAccuracy, 2), 0) / accuracies.length;
+    const stdDev = Math.sqrt(variance);
+
+    const firstHalf = recentHistory.slice(0, Math.floor(recentHistory.length / 2));
+    const secondHalf = recentHistory.slice(Math.floor(recentHistory.length / 2));
+    const firstHalfAcc = (firstHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / firstHalf.length) * 100;
+    const secondHalfAcc = (secondHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / secondHalf.length) * 100;
+    const trend = secondHalfAcc - firstHalfAcc;
+
+    let marketCondition: 'stable' | 'volatile' | 'trending_up' | 'trending_down' = 'stable';
+    let conditionText = '稳定';
+    let conditionColor = 'bg-green-50 text-green-700';
+    let conditionIcon = '📊';
+
+    if (stdDev > 15) {
+      marketCondition = 'volatile';
+      conditionText = '波动';
+      conditionColor = 'bg-red-50 text-red-700';
+      conditionIcon = '⚠️';
+    } else if (trend > 10) {
+      marketCondition = 'trending_up';
+      conditionText = '上升';
+      conditionColor = 'bg-blue-50 text-blue-700';
+      conditionIcon = '📈';
+    } else if (trend < -10) {
+      marketCondition = 'trending_down';
+      conditionText = '下降';
+      conditionColor = 'bg-orange-50 text-orange-700';
+      conditionIcon = '📉';
+    }
+
+    return { marketCondition, conditionText, conditionColor, conditionIcon };
+  }, [history]);
 
   return (
     <div className="space-y-12 max-w-7xl mx-auto pb-32 px-4 relative">
       
+      {/* 模型性能排行榜 */}
+      <section className="bg-white p-8 rounded-[3rem] border-2 border-gray-100 shadow-lg">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
+          <div>
+            <h4 className="text-xl font-black text-gray-900 flex items-center">
+              <Trophy className="w-5 h-5 mr-2 text-purple-600" />
+              模型性能排行榜
+            </h4>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={startPrediction}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center space-x-2 ${
+                isPredicting ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'bg-green-50 text-green-600 border border-green-200 hover:bg-green-100'
+              }`}
+              disabled={isPredicting}
+            >
+              <CheckCircle2 className="w-3 h-3" />
+              <span>开始预测</span>
+            </button>
+            <button
+              onClick={stopPrediction}
+              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center space-x-2 ${
+                !isPredicting ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100'
+              }`}
+              disabled={!isPredicting}
+            >
+              <XCircle className="w-3 h-3" />
+              <span>停止预测</span>
+            </button>
+            <button
+              onClick={clearAllData}
+              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center space-x-2"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>清除所有数据</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 总体统计卡片 */}
+        {modelPerformance.length > 0 && (() => {
+          const totalPredictions = modelPerformance.reduce((sum, m) => sum + m.total, 0);
+          const totalCorrect = modelPerformance.reduce((sum, m) => sum + m.correct, 0);
+          const overallAccuracy = totalPredictions > 0 ? Math.round((totalCorrect / totalPredictions) * 100) : 0;
+          const activeModels = modelPerformance.filter(m => m.total > 0).length;
+          const bestModel = modelPerformance[0];
+          const avgAccuracy = modelPerformance.length > 0 
+            ? Math.round(modelPerformance.reduce((sum, m) => sum + m.accuracy, 0) / modelPerformance.length) 
+            : 0;
+
+          return (
+            <div className="mb-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* 总预测场次 */}
+              <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-5 rounded-2xl border-2 border-blue-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Activity className="w-5 h-5 text-blue-600" />
+                  <span className="text-xs font-black text-blue-600 uppercase tracking-wider">总场次</span>
+                </div>
+                <p className="text-3xl font-black text-blue-900">{totalPredictions}</p>
+                <p className="text-xs text-blue-600 mt-1">{activeModels}/9 模型活跃</p>
+              </div>
+
+              {/* 成功预测场次 */}
+              <div className="bg-gradient-to-br from-emerald-50 to-green-50 p-5 rounded-2xl border-2 border-emerald-100">
+                <div className="flex items-center justify-between mb-2">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                  <span className="text-xs font-black text-emerald-600 uppercase tracking-wider">成功</span>
+                </div>
+                <p className="text-3xl font-black text-emerald-900">{totalCorrect}</p>
+                <p className="text-xs text-emerald-600 mt-1">{totalPredictions - totalCorrect} 次失败</p>
+              </div>
+
+              {/* 总胜率 */}
+              <div className="bg-gradient-to-br from-purple-50 to-pink-50 p-5 rounded-2xl border-2 border-purple-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Target className="w-5 h-5 text-purple-600" />
+                  <span className="text-xs font-black text-purple-600 uppercase tracking-wider">总胜率</span>
+                </div>
+                <p className="text-3xl font-black text-purple-900">{overallAccuracy}%</p>
+                <div className="mt-2 bg-white/50 rounded-full h-2 overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all"
+                    style={{ width: `${overallAccuracy}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* 智能推荐 */}
+              <div className="bg-gradient-to-br from-amber-50 to-orange-50 p-5 rounded-2xl border-2 border-amber-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Sparkles className="w-5 h-5 text-amber-600" />
+                  <span className="text-xs font-black text-amber-600 uppercase tracking-wider">智能推荐</span>
+                </div>
+                {!smartRecommendation ? (
+                  <div className="text-center py-2">
+                    <p className="text-sm text-amber-700">暂无推荐</p>
+                    <p className="text-xs text-amber-500 mt-1">等待更多数据</p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-lg font-black text-amber-900 truncate" title={smartRecommendation.model}>
+                      {smartRecommendation.model.length > 8 ? smartRecommendation.model.substring(0, 8) + '...' : smartRecommendation.model}
+                    </p>
+                    <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center space-x-1">
+                        <span className="text-xs text-amber-600">
+                          {smartRecommendation.accuracy}%
+                        </span>
+                        <span className="text-xs text-amber-400">·</span>
+                        <span className="text-xs text-amber-600">
+                          {smartRecommendation.total}场
+                        </span>
+                      </div>
+                      {smartRecommendation.isActive && (
+                        <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[9px] font-black rounded-full">
+                          活跃
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {modelPerformance.length > 0 ? (
+          <div className="space-y-4">
+            {modelPerformance.map((model, idx) => (
+              <div 
+                key={idx} 
+                className="relative cursor-pointer hover:bg-gray-50 rounded-2xl p-3 -mx-3 transition-all"
+                onClick={() => model.total > 0 && setSelectedModelForChart(model.model)}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center space-x-3">
+                    <span className={`text-2xl font-black ${
+                      idx === 0 ? 'text-amber-500' : 
+                      idx === 1 ? 'text-gray-400' : 
+                      idx === 2 ? 'text-orange-400' : 
+                      'text-gray-300'
+                    }`}>
+                      #{idx + 1}
+                    </span>
+                    <span className="text-sm font-bold text-gray-700">{model.model}</span>
+                    {model.total > 0 && (
+                      <ChevronRight className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    )}
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <div className="w-32 bg-gray-100 rounded-full h-3 overflow-hidden">
+                      <div 
+                        className={`h-full rounded-full transition-all ${
+                          model.accuracy >= 90 ? 'bg-gradient-to-r from-green-500 to-emerald-600' :
+                          model.accuracy >= 80 ? 'bg-gradient-to-r from-blue-500 to-indigo-600' :
+                          model.accuracy >= 70 ? 'bg-gradient-to-r from-amber-500 to-orange-600' :
+                          'bg-gradient-to-r from-gray-400 to-gray-500'
+                        }`}
+                        style={{ width: `${model.accuracy}%` }}
+                      />
+                    </div>
+                    <span className="text-lg font-black text-indigo-600 w-12 text-right">{model.accuracy}%</span>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2 text-xs text-gray-400 ml-11">
+                  <span>{model.correct}胜 / {model.total - model.correct}负</span>
+                  <span>·</span>
+                  <span>共{model.total}次预测</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="py-12 text-center text-gray-400">
+            <Trophy className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-bold">暂无模型数据</p>
+            <p className="text-xs mt-1">开始预测后将显示各模型的性能统计</p>
+          </div>
+        )}
+      </section>
+
+      {/* 模型性能趋势图表模态框 */}
+      {selectedModelForChart && (
+        <ModelTrendAnalysisModal 
+          modelId={selectedModelForChart} 
+          onClose={() => setSelectedModelForChart(null)} 
+          modelStats={modelStats} 
+        />
+      )}
+
       {/* MATRIX CONTROLS */}
-      <section className="space-y-8">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="flex items-center space-x-4">
-            <div className="p-3 bg-indigo-50 rounded-2xl">
-              <BrainCircuit className="w-7 h-7 text-indigo-600" />
+      <section className="space-y-6">
+        <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
+          <div className="flex items-start space-x-4">
+            <div className="p-3 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl shadow-lg">
+              <BrainCircuit className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h3 className="text-3xl font-black text-gray-900 tracking-tight">AI 数据稳定演算矩阵</h3>
-              <p className="text-xs text-amber-500 font-black uppercase mt-1 flex items-center">
-                 <ShieldCheck className="w-3.5 h-3.5 mr-1" />
-                 v4.0 稳定模式：追求高确定性信号
-              </p>
+              <h3 className="text-2xl font-bold text-gray-900">AI 数据稳定演算矩阵</h3>
+              {/* 市场环境识别 */}
+              {!marketEnvironment ? (
+                <div className="flex items-center space-x-2 mt-2">
+                  <span className="px-3 py-1 bg-gray-100 text-gray-500 rounded-lg font-semibold text-sm">
+                    数据收集中...
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-2 mt-2">
+                  <span className={`px-3 py-1 rounded-lg font-semibold text-sm flex items-center space-x-1 ${marketEnvironment.conditionColor}`}>
+                    <span>{marketEnvironment.conditionIcon}</span>
+                    <span>市场环境：{marketEnvironment.conditionText}</span>
+                  </span>
+                  {marketEnvironment.marketCondition === 'volatile' && (
+                    <span className="px-2 py-1 bg-amber-50 text-amber-600 rounded-lg text-xs font-bold">
+                      建议谨慎
+                    </span>
+                  )}
+                  {marketEnvironment.marketCondition === 'trending_up' && (
+                    <span className="px-2 py-1 bg-green-50 text-green-600 rounded-lg text-xs font-bold">
+                      表现改善
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
-          <div className="flex items-center space-x-3">
-             <button 
-                onClick={() => setShowDictionary(true)}
-                className="px-6 py-2.5 rounded-2xl text-[11px] font-black uppercase transition-all flex items-center space-x-2 bg-blue-50 text-blue-600 border border-blue-100 hover:bg-blue-100"
-              >
-                <HelpCircle className="w-4 h-4" />
-                <span>预测模型介绍</span>
-              </button>
-             <button 
-                onClick={() => setSelectedRuleId('ALL')}
-                className={`px-6 py-2.5 rounded-2xl text-[11px] font-black uppercase transition-all flex items-center space-x-2 ${selectedRuleId === 'ALL' ? 'bg-indigo-600 text-white shadow-xl' : 'bg-white border border-gray-100 text-gray-400 hover:bg-gray-50'}`}
-              >
-                <Activity className="w-4 h-4" />
-                <span>显示全部历史</span>
-              </button>
           </div>
         </div>
         
         {/* MATRIX GRID */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {rulesMatrix.map((item, idx) => {
-            const isSelected = selectedRuleId === item.rule.id;
             const stats = ruleAccuracyStats[item.rule.id];
             
             return (
               <div 
                 key={idx} 
-                onClick={() => setSelectedRuleId(item.rule.id)}
-                className={`cursor-pointer bg-white p-7 rounded-[2.8rem] border-2 transition-all duration-500 relative group overflow-hidden ${
-                  isSelected ? 'border-indigo-600 shadow-2xl scale-[1.05] z-20' : 'border-gray-50 hover:border-indigo-200 shadow-sm'
-                }`}
+                className="bg-white p-5 rounded-2xl border border-gray-100 hover:border-indigo-200 hover:shadow-lg transition-all duration-200 relative group"
               >
-                <div className="flex justify-between items-start mb-6">
-                  <div className="flex flex-col">
-                    <span className={`px-3 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider ${isSelected ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
-                      {item.rule.label}
-                    </span>
-                    <div className="mt-2 space-y-2">
-                       <div className="flex items-center space-x-1.5">
-                          <Trophy className="w-3 h-3 text-amber-500" />
-                          <span className="text-[10px] font-bold text-indigo-600">胜率: {stats?.pAcc || 0}% / {stats?.sAcc || 0}%</span>
-                       </div>
-                       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[8px] font-black uppercase text-gray-400 bg-gray-50/50 p-2 rounded-xl">
-                          <div className="flex justify-between items-center">
-                            <span>单:</span>
-                            <span className="text-red-500 font-bold">{stats?.oddAcc || 0}%</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span>双:</span>
-                            <span className="text-teal-500 font-bold">{stats?.evenAcc || 0}%</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span>大:</span>
-                            <span className="text-orange-500 font-bold">{stats?.bigAcc || 0}%</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span>小:</span>
-                            <span className="text-indigo-500 font-bold">{stats?.smallAcc || 0}%</span>
-                          </div>
-                       </div>
+                {/* Header */}
+                <div className="flex justify-between items-start mb-4">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="px-2.5 py-1 bg-gray-100 text-gray-700 rounded-lg text-xs font-bold">
+                        {item.rule.label}
+                      </span>
+                      {item.result.shouldPredict && (
+                        <Sparkles className="w-4 h-4 text-amber-500 animate-pulse" />
+                      )}
+                    </div>
+                    
+                    {/* Stats Grid */}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="flex items-center justify-between px-2 py-1 bg-red-50 rounded">
+                        <span className="text-gray-600 font-medium">单</span>
+                        <span className="text-red-600 font-bold">{stats?.oddAcc || 0}%</span>
+                      </div>
+                      <div className="flex items-center justify-between px-2 py-1 bg-teal-50 rounded">
+                        <span className="text-gray-600 font-medium">双</span>
+                        <span className="text-teal-600 font-bold">{stats?.evenAcc || 0}%</span>
+                      </div>
+                      <div className="flex items-center justify-between px-2 py-1 bg-orange-50 rounded">
+                        <span className="text-gray-600 font-medium">大</span>
+                        <span className="text-orange-600 font-bold">{stats?.bigAcc || 0}%</span>
+                      </div>
+                      <div className="flex items-center justify-between px-2 py-1 bg-indigo-50 rounded">
+                        <span className="text-gray-600 font-medium">小</span>
+                        <span className="text-indigo-600 font-bold">{stats?.smallAcc || 0}%</span>
+                      </div>
                     </div>
                   </div>
-                  {item.result.shouldPredict && <Sparkles className="w-5 h-5 text-amber-400 animate-pulse" />}
                 </div>
                 
+                {/* Prediction Display */}
                 {item.result.shouldPredict ? (
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-around py-5 bg-gray-50 rounded-[2rem] border border-gray-100">
-                      <div className="text-center">
-                        <span className="text-[9px] font-black text-gray-400 uppercase block mb-1">单双</span>
-                        <div className="text-3xl font-black" style={{ color: item.result.nextParity === 'NEUTRAL' ? '#94a3b8' : (item.result.nextParity === 'ODD' ? 'var(--color-odd)' : 'var(--color-even)') }}>
-                          {item.result.nextParity === 'NEUTRAL' ? '观望' : (item.result.nextParity === 'ODD' ? '单' : '双')}
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="text-center p-3 bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl">
+                        <span className="text-xs text-gray-500 font-medium block mb-1">单双</span>
+                        <div className="text-2xl font-bold" style={{ 
+                          color: item.result.nextParity === 'NEUTRAL' ? '#94a3b8' : 
+                                (item.result.nextParity === 'ODD' ? '#ef4444' : '#14b8a6') 
+                        }}>
+                          {item.result.nextParity === 'NEUTRAL' ? '-' : 
+                           (item.result.nextParity === 'ODD' ? '单' : '双')}
                         </div>
                       </div>
-                      <div className="w-px h-10 bg-gray-200"></div>
-                      <div className="text-center">
-                        <span className="text-[9px] font-black text-gray-400 uppercase block mb-1">大小</span>
-                        <div className="text-3xl font-black" style={{ color: item.result.nextSize === 'NEUTRAL' ? '#94a3b8' : (item.result.nextSize === 'BIG' ? 'var(--color-big)' : 'var(--color-small)') }}>
-                          {item.result.nextSize === 'NEUTRAL' ? '观望' : (item.result.nextSize === 'BIG' ? '大' : '小')}
+                      <div className="text-center p-3 bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl">
+                        <span className="text-xs text-gray-500 font-medium block mb-1">大小</span>
+                        <div className="text-2xl font-bold" style={{ 
+                          color: item.result.nextSize === 'NEUTRAL' ? '#94a3b8' : 
+                                (item.result.nextSize === 'BIG' ? '#f97316' : '#6366f1') 
+                        }}>
+                          {item.result.nextSize === 'NEUTRAL' ? '-' : 
+                           (item.result.nextSize === 'BIG' ? '大' : '小')}
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center justify-between text-[11px] font-black">
-                       <span className="text-gray-400 uppercase tracking-widest">目标高度:</span>
-                       <span className="text-indigo-600 tabular-nums font-black">#{item.result.targetHeight}</span>
+                    <div className="flex items-center justify-between text-xs bg-indigo-50 px-3 py-2 rounded-lg">
+                      <span className="text-gray-600 font-medium">目标高度</span>
+                      <span className="text-indigo-600 font-bold tabular-nums">#{item.result.targetHeight}</span>
                     </div>
                   </div>
                 ) : (
-                  <div className="py-12 text-center opacity-30 group-hover:opacity-50 transition-opacity">
-                    <Microscope className="w-10 h-10 mx-auto mb-3 text-gray-400" />
-                    <p className="text-[10px] font-black uppercase tracking-widest leading-relaxed">捕捉高置信度信号...<br/>当前采样共振偏低</p>
+                  <div className="py-8 text-center opacity-40">
+                    <Microscope className="w-8 h-8 mx-auto mb-2 text-gray-400" />
+                    <p className="text-xs text-gray-500 font-medium">等待信号...</p>
                   </div>
                 )}
-                {isSelected && <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-indigo-600"></div>}
               </div>
             );
           })}
         </div>
       </section>
 
-      {/* FOCUS PANEL */}
-      {focusedRuleResult && (
+      {/* FOCUS PANEL - REMOVED */}
+      {false && focusedRuleResult && (
         <section className="bg-white rounded-[4rem] p-10 md:p-14 shadow-2xl border-4 border-indigo-50 animate-in fade-in slide-in-from-bottom-8 duration-700">
            <div className="flex flex-col lg:flex-row items-center justify-between gap-12">
               <div className="flex-1 space-y-8">
@@ -478,67 +1193,6 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
         </section>
       )}
 
-      {/* DICTIONARY MODAL */}
-      {showDictionary && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-in fade-in duration-300">
-          <div className="bg-white rounded-[3.5rem] p-10 md:p-14 shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-y-auto no-scrollbar animate-in zoom-in-95 duration-300 relative">
-            <button 
-              onClick={() => setShowDictionary(false)}
-              className="absolute top-10 right-10 p-3 hover:bg-gray-100 rounded-full text-gray-400 transition-colors z-10"
-            >
-              <X className="w-8 h-8" />
-            </button>
-            
-            <div className="flex items-center space-x-5 mb-12">
-              <div className="p-4 bg-blue-600 rounded-3xl shadow-lg shadow-blue-200">
-                <BookOpen className="w-10 h-10 text-white" />
-              </div>
-              <div>
-                <h3 className="text-4xl font-black text-gray-900 tracking-tight">AI 演算逻辑字典 v4.0</h3>
-                <p className="text-base text-gray-400 font-bold mt-1">深度解读 3.9 升级版稳定演算逻辑矩阵</p>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pb-10">
-              {AI_MODELS_DOCS.map((model) => (
-                <div 
-                  key={model.id}
-                  onClick={() => setShowDocsId(showDocsId === model.id ? null : model.id)}
-                  className={`p-10 rounded-[3rem] border-2 transition-all duration-500 cursor-pointer relative flex flex-col justify-between group h-full shadow-sm hover:shadow-xl ${
-                    showDocsId === model.id ? 'border-blue-500 bg-blue-50/10' : 'border-gray-50 bg-gray-50/20 hover:border-blue-200 hover:bg-white'
-                  }`}
-                >
-                  <div className="flex items-center space-x-6">
-                    <div className={`p-5 rounded-[2rem] transition-transform group-hover:scale-110 shadow-sm ${model.bg}`}>
-                      {React.cloneElement(model.icon as React.ReactElement, { className: "w-8 h-8 " + model.color })}
-                    </div>
-                    <div className="flex-1">
-                      <h4 className="text-2xl font-black text-gray-900 leading-tight">
-                        {model.name}
-                      </h4>
-                      <p className="text-sm font-bold text-gray-400 mt-1">{model.short}</p>
-                    </div>
-                  </div>
-                  
-                  <div className={`transition-all duration-500 overflow-hidden ${showDocsId === model.id ? 'max-h-[500px] mt-8 opacity-100' : 'max-h-0 opacity-0'}`}>
-                    <p className="text-base text-gray-500 font-medium leading-relaxed bg-white/80 p-8 rounded-[2.5rem] border border-gray-100">
-                      {model.desc}
-                    </p>
-                  </div>
-
-                  <div className="mt-10 flex justify-end">
-                    <span className="text-xs font-black text-blue-500 uppercase flex items-center group-hover:translate-x-1 transition-transform">
-                      {showDocsId === model.id ? '收起详情' : '点击阅读详解'}
-                      <ChevronRight className="w-4 h-4 ml-1" />
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* HISTORY TABLE */}
       <section className="bg-transparent overflow-hidden">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-10 mb-14 px-4">
@@ -547,31 +1201,113 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               <Clock className="w-8 h-8 text-slate-800" />
             </div>
             <div>
-              <h3 className="text-3xl font-black text-slate-900 tracking-tight">稳定演算历史追溯</h3>
-              <p className="text-[11px] text-gray-400 font-bold uppercase tracking-widest mt-2 flex items-center">
-                <Filter className="w-3 h-3 mr-2" />
-                当前焦点: {selectedRuleId === 'ALL' ? '全域实时流水' : rules.find(r => r.id === selectedRuleId)?.label}
+              <h3 className="text-3xl font-black text-slate-900 tracking-tight">演算历史</h3>
+              <p className="text-[11px] text-gray-400 font-bold uppercase tracking-widest mt-2 flex items-center flex-wrap gap-2">
+                <Filter className="w-3 h-3 mr-1" />
+                {selectedHistoryRuleId !== 'ALL' && (
+                  <>
+                    <span>规则: {rules.find(r => r.id === selectedHistoryRuleId)?.label}</span>
+                    <span className="text-gray-300">|</span>
+                  </>
+                )}
+                {selectedModelId !== 'ALL' && (
+                  <>
+                    <span>模型: {selectedModelId}</span>
+                    <span className="text-gray-300">|</span>
+                  </>
+                )}
+                <span>显示最近 400 条记录</span>
+                {filteredHistory.length > 0 && (
+                  <span className="ml-1 px-2 py-0.5 bg-indigo-100 text-indigo-600 rounded-full text-[10px]">
+                    {filteredHistory.length} 条
+                  </span>
+                )}
               </p>
             </div>
           </div>
 
-          <div className="flex bg-white p-2 rounded-3xl shadow-sm border border-gray-100 overflow-x-auto no-scrollbar">
-            {['ALL', 'ODD', 'EVEN', 'BIG', 'SMALL'].map(f => (
-              <button
-                key={f}
-                onClick={() => setActiveFilter(f as PredictionFilter)}
-                className={`px-6 py-3 rounded-2xl text-[11px] font-black uppercase transition-all whitespace-nowrap ${
-                  activeFilter === f ? 'bg-indigo-600 text-white shadow-xl' : 'text-gray-400 hover:text-slate-800'
-                }`}
+          <div className="flex flex-col sm:flex-row gap-4">
+            {/* 预测类型筛选器 */}
+            <div className="flex bg-white p-2 rounded-3xl shadow-sm border border-gray-100 overflow-x-auto no-scrollbar">
+              {['ALL', 'ODD', 'EVEN', 'BIG', 'SMALL'].map(f => (
+                <button
+                  key={f}
+                  onClick={() => setActiveFilter(f as PredictionFilter)}
+                  className={`px-6 py-3 rounded-2xl text-[11px] font-black uppercase transition-all whitespace-nowrap ${
+                    activeFilter === f ? 'bg-indigo-600 text-white shadow-xl' : 'text-gray-400 hover:text-slate-800'
+                  }`}
+                >
+                  {f === 'ALL' ? '全域' : f === 'ODD' ? '单' : f === 'EVEN' ? '双' : f === 'BIG' ? '大' : f === 'SMALL' ? '小' : f}
+                </button>
+              ))}
+            </div>
+
+            {/* 模型筛选器 */}
+            <div className="flex items-center bg-white px-4 py-2 rounded-3xl shadow-sm border border-gray-100">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-wider mr-3 whitespace-nowrap">
+                模型:
+              </label>
+              <select
+                value={selectedModelId}
+                onChange={(e) => setSelectedModelId(e.target.value)}
+                className="text-[11px] font-bold text-gray-700 bg-transparent border-none outline-none cursor-pointer pr-8"
               >
-                {f === 'ALL' ? '全域' : f === 'ODD' ? '单' : f === 'EVEN' ? '双' : f === 'BIG' ? '大' : f === 'SMALL' ? '小' : f}
-              </button>
-            ))}
+                <option value="ALL">全部模型</option>
+                <option value="隐马尔可夫模型">隐马尔可夫模型</option>
+                <option value="LSTM时间序列">LSTM时间序列</option>
+                <option value="ARIMA模型">ARIMA模型</option>
+                <option value="熵值突变检测">熵值突变检测</option>
+                <option value="蒙特卡洛模拟">蒙特卡洛模拟</option>
+                <option value="小波变换分析">小波变换分析</option>
+                <option value="马尔可夫状态迁移">马尔可夫状态迁移</option>
+                <option value="贝叶斯后验推理">贝叶斯后验推理</option>
+                <option value="密集簇群共振">密集簇群共振</option>
+              </select>
+            </div>
+
+            {/* 采样规则筛选器 */}
+            <div className="flex items-center bg-white px-4 py-2 rounded-3xl shadow-sm border border-gray-100">
+              <label className="text-[10px] font-black text-gray-400 uppercase tracking-wider mr-3 whitespace-nowrap">
+                规则:
+              </label>
+              <select
+                value={selectedHistoryRuleId}
+                onChange={(e) => setSelectedHistoryRuleId(e.target.value)}
+                className="text-[11px] font-bold text-gray-700 bg-transparent border-none outline-none cursor-pointer pr-8"
+              >
+                <option value="ALL">全部规则</option>
+                {rules.map(rule => (
+                  <option key={rule.id} value={rule.id}>{rule.label}</option>
+                ))}
+              </select>
+            </div>
+            
+            {history.length > 0 && (
+              <div className="flex gap-2">
+                <button
+                  onClick={exportHistory}
+                  className="px-6 py-3 rounded-2xl text-[11px] font-black uppercase transition-all whitespace-nowrap bg-green-50 text-green-600 border border-green-200 hover:bg-green-100 flex items-center space-x-2"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>导出历史</span>
+                </button>
+                {selectedRuleId !== 'ALL' && (
+                  <button
+                    onClick={() => clearRuleHistory(selectedRuleId)}
+                    className="px-6 py-3 rounded-2xl text-[11px] font-black uppercase transition-all whitespace-nowrap bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100 flex items-center space-x-2"
+                  >
+                    <X className="w-4 h-4" />
+                    <span>清除当前规则</span>
+                  </button>
+                )}
+
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="px-4 pb-20 space-y-6">
-          <div className="grid grid-cols-6 gap-4 px-10 text-[11px] font-black text-gray-400 uppercase tracking-[0.2em] mb-4">
+        <div className="px-4 pb-20 space-y-4">
+          <div className="grid grid-cols-6 gap-4 px-10 text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">
             <div>预测高度</div>
             <div className="text-center">演算模型</div>
             <div className="text-center">采样规则</div>
@@ -581,16 +1317,16 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
           </div>
 
           {filteredHistory.length === 0 ? (
-            <div className="bg-white rounded-[3rem] py-32 text-center border border-gray-100 shadow-sm opacity-50 italic font-medium text-lg tracking-widest">
+            <div className="bg-white rounded-[3rem] py-24 text-center border border-gray-100 shadow-sm opacity-50 italic font-medium text-base tracking-wide">
               暂无演算记录
             </div>
           ) : (
-            filteredHistory.map(item => {
+            paginatedHistory.map(item => {
               const rule = rules.find(r => r.id === item.ruleId);
               return (
                 <div 
                   key={item.id} 
-                  className="bg-white rounded-[3rem] p-4 px-10 border border-gray-50 shadow-sm hover:shadow-md transition-all duration-300 grid grid-cols-6 items-center relative overflow-hidden group"
+                  className="bg-white rounded-[2.5rem] p-3 px-8 border border-gray-50 shadow-sm hover:shadow-md transition-shadow duration-200 grid grid-cols-6 items-center relative overflow-hidden group"
                 >
                   <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${
                     item.resolved 
@@ -598,74 +1334,88 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
                       : 'bg-amber-400 animate-pulse'
                   }`}></div>
 
-                  <div className="font-black text-indigo-600 tabular-nums text-xl">
+                  <div className="font-bold text-indigo-600 tabular-nums text-base">
                     #{item.targetHeight}
                   </div>
 
                   <div className="text-center">
-                    <span className="px-5 py-2 bg-gray-50 rounded-2xl border border-gray-100 text-[10px] font-black text-slate-500 shadow-sm whitespace-nowrap">
+                    <span className="px-3 py-1.5 bg-gray-50 rounded-xl border border-gray-100 text-xs font-bold text-slate-600 shadow-sm whitespace-nowrap">
                       {item.detectedCycle}
                     </span>
                   </div>
 
                   <div className="text-center">
-                    <span className="px-4 py-1.5 bg-indigo-50/50 rounded-xl text-[10px] font-black text-indigo-500 border border-indigo-100/50 whitespace-nowrap">
+                    <span className="px-3 py-1 bg-indigo-50/50 rounded-lg text-xs font-bold text-indigo-600 border border-indigo-100/50 whitespace-nowrap">
                       {rule?.label || '未知规则'}
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-center space-x-3">
-                    <span className={`px-4 py-2 rounded-xl text-[10px] font-black text-white shadow-sm transition-all ${
-                      item.nextParity === 'ODD' ? 'bg-red-500' : (item.nextParity === 'EVEN' ? 'bg-teal-500' : 'bg-gray-400')
-                    }`}>
-                      {item.nextParity === 'ODD' ? '单' : (item.nextParity === 'EVEN' ? '双' : '-')}
-                    </span>
-                    <span className={`px-4 py-2 rounded-xl text-[10px] font-black text-white shadow-sm transition-all ${
-                      item.nextSize === 'BIG' ? 'bg-orange-500' : (item.nextSize === 'SMALL' ? 'bg-indigo-500' : 'bg-gray-400')
-                    }`}>
-                      {item.nextSize === 'BIG' ? '大' : (item.nextSize === 'SMALL' ? '小' : '-')}
-                    </span>
+                  <div className="flex items-center justify-center space-x-2">
+                    {item.nextParity !== 'NEUTRAL' && (
+                      <span className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm ${
+                        item.nextParity === 'ODD' ? 'bg-red-500' : 'bg-teal-500'
+                      }`}>
+                        {item.nextParity === 'ODD' ? '单' : '双'}
+                      </span>
+                    )}
+                    {item.nextSize !== 'NEUTRAL' && (
+                      <span className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-sm ${
+                        item.nextSize === 'BIG' ? 'bg-orange-500' : 'bg-indigo-500'
+                      }`}>
+                        {item.nextSize === 'BIG' ? '大' : '小'}
+                      </span>
+                    )}
+                    {item.nextParity === 'NEUTRAL' && item.nextSize === 'NEUTRAL' && (
+                      <span className="text-xs text-gray-400 font-bold">-</span>
+                    )}
                   </div>
 
-                  <div className="flex items-center justify-center space-x-3">
+                  <div className="flex items-center justify-center space-x-2">
                     {item.resolved ? (
                       <>
-                        <span className={`px-4 py-2 rounded-xl text-[10px] font-black text-white opacity-70 ${
-                          item.actualParity === 'ODD' ? 'bg-red-400' : 'bg-teal-400'
-                        }`}>{item.actualParity === 'ODD' ? '单' : '双'}</span>
-                        <span className={`px-4 py-2 rounded-xl text-[10px] font-black text-white opacity-70 ${
-                          item.actualSize === 'BIG' ? 'bg-orange-400' : 'bg-indigo-400'
-                        }`}>{item.actualSize === 'BIG' ? '大' : '小'}</span>
+                        {item.nextParity !== 'NEUTRAL' && (
+                          <span className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white opacity-70 ${
+                            item.actualParity === 'ODD' ? 'bg-red-400' : 'bg-teal-400'
+                          }`}>{item.actualParity === 'ODD' ? '单' : '双'}</span>
+                        )}
+                        {item.nextSize !== 'NEUTRAL' && (
+                          <span className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white opacity-70 ${
+                            item.actualSize === 'BIG' ? 'bg-orange-400' : 'bg-indigo-400'
+                          }`}>{item.actualSize === 'BIG' ? '大' : '小'}</span>
+                        )}
+                        {item.nextParity === 'NEUTRAL' && item.nextSize === 'NEUTRAL' && (
+                          <span className="text-xs text-gray-400 font-bold">-</span>
+                        )}
                       </>
                     ) : (
                       <div className="flex items-center space-x-2">
                         <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />
-                        <span className="text-[10px] text-amber-600 font-black">对齐中</span>
+                        <span className="text-xs text-amber-600 font-bold">对齐中</span>
                       </div>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-center space-x-3">
+                  <div className="flex items-center justify-center space-x-2">
                     {item.resolved && (
                       <>
                         {item.nextParity !== 'NEUTRAL' && (
-                          <div className={`px-3 py-1.5 rounded-2xl flex items-center space-x-1.5 ${
+                          <div className={`px-2.5 py-1 rounded-lg flex items-center space-x-1 ${
                             item.isParityCorrect ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
                           }`}>
-                            {item.isParityCorrect ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                            <span className="text-[10px] font-black">单双</span>
+                            {item.isParityCorrect ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                            <span className="text-xs font-bold">单双</span>
                           </div>
                         )}
                         {item.nextSize !== 'NEUTRAL' && (
-                          <div className={`px-3 py-1.5 rounded-2xl flex items-center space-x-1.5 ${
+                          <div className={`px-2.5 py-1 rounded-lg flex items-center space-x-1 ${
                             item.isSizeCorrect ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
                           }`}>
-                            {item.isParityCorrect ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                            <span className="text-[10px] font-black">大小</span>
+                            {item.isSizeCorrect ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                            <span className="text-xs font-bold">大小</span>
                           </div>
                         )}
                         {item.nextParity === 'NEUTRAL' && item.nextSize === 'NEUTRAL' && (
-                          <span className="text-[10px] text-gray-300 italic font-medium tracking-widest">分析中</span>
+                          <span className="text-xs text-gray-300 italic font-medium">分析中</span>
                         )}
                       </>
                     )}
@@ -674,11 +1424,56 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               );
             })
           )}
+          
+          {/* 分页控件 */}
+          {filteredHistory.length > 0 && (
+            <div className="flex flex-col sm:flex-row items-center justify-between mt-8 px-4">
+              <div className="flex items-center mb-4 sm:mb-0">
+                <span className="text-sm font-medium text-gray-600 mr-3">每页显示:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span className="text-sm text-gray-500 ml-3">
+                  共 {filteredHistory.length} 条记录
+                </span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+                  disabled={currentPage === 1}
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  上一页
+                </button>
+                <span className="px-3 py-2 text-sm font-medium text-gray-700">
+                  {currentPage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-3 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </section>
     </div>
   );
 });
+
+
 
 AIPrediction.displayName = 'AIPrediction';
 

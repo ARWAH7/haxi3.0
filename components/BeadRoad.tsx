@@ -23,6 +23,24 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
     );
   }, [blocks, mode, rows, rule]);
 
+  // 计算网格的唯一标识符，用于强制重新渲染
+  const gridKey = useMemo(() => {
+    // ⚡ 只调用一次 flat()，从后向前遍历替代 reverse + find
+    const flatGrid = grid.flat();
+    const firstCell = flatGrid.find(cell => cell.blockHeight);
+    let lastCell: typeof firstCell = undefined;
+    for (let i = flatGrid.length - 1; i >= 0; i--) {
+      if (flatGrid[i].blockHeight) { lastCell = flatGrid[i]; break; }
+    }
+    const key = `${firstCell?.blockHeight || 'empty'}-${lastCell?.blockHeight || 'empty'}`;
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[BeadRoad] 🔑 Grid Key: ${key} (第一个: ${firstCell?.blockHeight}, 最后一个: ${lastCell?.blockHeight})`);
+    }
+
+    return key;
+  }, [grid]);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const isFirstDataLoad = useRef(true);
   const lastBlocksCount = useRef(blocks.length);
@@ -105,7 +123,7 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
     }
   }, [blocks, mode]);
 
-  const renderCell = (type: any, value: number | undefined, colIdx: number, rowIdx: number) => {
+  const renderCell = (type: any, value: number | undefined, blockHeight: number | undefined, colIdx: number, rowIdx: number) => {
     if (!type) return <div key={`${colIdx}-${rowIdx}`} className="w-8 h-8 border-r border-b border-gray-100/30 shrink-0" />;
     
     const isParity = mode === 'parity';
@@ -126,7 +144,7 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
           {label}
         </div>
         <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-[10px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 pointer-events-none font-bold whitespace-nowrap">
-          {value}
+          {blockHeight ? `Block #${blockHeight}` : value}
         </div>
       </div>
     );
@@ -161,26 +179,34 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
       </div>
 
       <div className="flex h-auto min-h-0">
-        <div 
-          ref={containerRef}
-          className="overflow-auto custom-scrollbar border border-gray-100 bg-gray-50/20 flex-1"
-        >
-          <div className="flex h-max w-max">
-            {grid.map((column, colIdx) => (
-              <div key={colIdx} className="flex flex-col">
-                {column.map((cell, rowIdx) => renderCell(cell.type, cell.value, colIdx, rowIdx))}
-              </div>
-            ))}
-          </div>
-        </div>
-        
-        {/* Row numbers on the right */}
-        <div className="flex flex-col border-l border-gray-100 bg-gray-50/50 shrink-0">
+        {/* Row numbers on the left */}
+        <div className="flex flex-col border-r border-gray-100 bg-gray-50/50 shrink-0">
           {Array.from({ length: rows }).map((_, i) => (
             <div key={i} className="w-8 h-8 flex items-center justify-center text-[10px] font-black text-gray-300 border-b border-gray-100/30">
               {i + 1}
             </div>
           ))}
+        </div>
+        
+        <div 
+          ref={containerRef}
+          className="overflow-x-auto custom-scrollbar border border-gray-100 bg-gray-50/20 flex-1"
+        >
+          <div className="flex h-max w-max pr-2" key={gridKey}>
+            {grid.map((column, colIdx) => {
+              // Generate stable key based on first non-null cell's blockHeight
+              const firstNonNullCell = column.find(cell => cell.type !== null);
+              const columnKey = firstNonNullCell?.blockHeight 
+                ? `col-${firstNonNullCell.blockHeight}` 
+                : `empty-${colIdx}`;
+              
+              return (
+                <div key={columnKey} className="flex flex-col">
+                  {column.map((cell, rowIdx) => renderCell(cell.type, cell.value, cell.blockHeight, colIdx, rowIdx))}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>
@@ -189,4 +215,13 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
 
 BeadRoad.displayName = 'BeadRoad';
 
-export default BeadRoad;
+// ✅ React.memo 优化：只有当 blocks、mode、rule、rows 改变时才重新渲染
+export default memo(BeadRoad, (prevProps, nextProps) => {
+  return (
+    prevProps.blocks === nextProps.blocks &&
+    prevProps.mode === nextProps.mode &&
+    prevProps.rule?.id === nextProps.rule?.id &&
+    prevProps.rows === nextProps.rows &&
+    prevProps.title === nextProps.title
+  );
+});

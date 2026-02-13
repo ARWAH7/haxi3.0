@@ -156,7 +156,7 @@ const TrendChart: React.FC<TrendChartProps> = memo(({ blocks, mode, title, rows 
         ref={containerRef}
         className="overflow-auto custom-scrollbar rounded-lg border border-gray-100 bg-gray-50/20 h-auto min-h-0"
       >
-        <div className="flex h-max w-max">
+        <div className="flex h-max w-max pr-2">
           {grid.map((column, colIdx) => (
             <div key={colIdx} className="flex flex-col">
               {column.map((cell, rowIdx) => renderCell(cell.type, colIdx, rowIdx))}
@@ -170,4 +170,12 @@ const TrendChart: React.FC<TrendChartProps> = memo(({ blocks, mode, title, rows 
 
 TrendChart.displayName = 'TrendChart';
 
-export default TrendChart;
+// ✅ React.memo 优化：只有当 blocks、mode、rows、title 改变时才重新渲染
+export default memo(TrendChart, (prevProps, nextProps) => {
+  return (
+    prevProps.blocks === nextProps.blocks &&
+    prevProps.mode === nextProps.mode &&
+    prevProps.rows === nextProps.rows &&
+    prevProps.title === nextProps.title
+  );
+});
